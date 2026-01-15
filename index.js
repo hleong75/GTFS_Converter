@@ -7,8 +7,20 @@ const PDFDocument = require('pdfkit');
 
 const REQUIRED_FILES = ['routes.txt', 'trips.txt', 'stops.txt', 'stop_times.txt'];
 
+const normalizeStopValue = (value) => {
+  if (!value) return '';
+  return String(value).trim().toLowerCase();
+};
+
 const parseArgs = (argv) => {
-  const args = { input: null, output: 'output', route: null, maxTrips: 8, help: false };
+  const args = {
+    input: null,
+    output: 'output',
+    route: null,
+    maxTrips: 8,
+    help: false,
+    majorStops: new Set()
+  };
   for (let i = 2; i < argv.length; i += 1) {
     const value = argv[i];
     const nextValue = () => {
@@ -32,6 +44,12 @@ const parseArgs = (argv) => {
         throw new Error('Invalid value for --max-trips; expected a positive integer.');
       }
       args.maxTrips = maxTrips;
+    } else if (value === '--major-stops') {
+      const stops = nextValue()
+        .split(',')
+        .map((stop) => normalizeStopValue(stop))
+        .filter(Boolean);
+      stops.forEach((stop) => args.majorStops.add(stop));
     }
   }
   return args;
@@ -47,6 +65,7 @@ Options:
   -i, --input       Path to GTFS zip file or extracted folder (required)
   -o, --output      Output directory for HTML/PDF files (default: output)
   -r, --route       Only render a specific route by route_id or short_name
+  --major-stops     Comma-separated stop IDs or names to emphasize as major stops
   --max-trips       Maximum trips to include per timetable (default: 8)
   -h, --help        Show this help message
 `);
@@ -58,6 +77,70 @@ const parseCsv = (content) =>
     skip_empty_lines: true,
     trim: true
   });
+
+const DAY_LABELS = [
+  { key: 'monday', label: 'lundi' },
+  { key: 'tuesday', label: 'mardi' },
+  { key: 'wednesday', label: 'mercredi' },
+  { key: 'thursday', label: 'jeudi' },
+  { key: 'friday', label: 'vendredi' },
+  { key: 'saturday', label: 'samedi' },
+  { key: 'sunday', label: 'dimanche' }
+];
+
+const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const formatDate = (dateValue) => {
+  if (!dateValue || dateValue.length !== 8) return dateValue || '';
+  const year = dateValue.slice(0, 4);
+  const month = dateValue.slice(4, 6);
+  const day = dateValue.slice(6, 8);
+  return `${day}/${month}/${year}`;
+};
+
+const formatServiceDays = (service) => {
+  if (!service) return '';
+  const activeDays = DAY_LABELS.flatMap((day, index) =>
+    String(service[day.key]) === '1' ? [{ ...day, index }] : []
+  );
+  if (!activeDays.length) return '';
+  if (activeDays.length === DAY_LABELS.length) {
+    return 'Tous les jours';
+  }
+  const isConsecutive = activeDays.every((day, index) =>
+    index === 0 ? true : day.index === activeDays[index - 1].index + 1
+  );
+  if (isConsecutive && activeDays.length > 1) {
+    return `Du ${activeDays[0].label} au ${activeDays[activeDays.length - 1].label}`;
+  }
+  if (activeDays.length === 1) {
+    return `Le ${activeDays[0].label}`;
+  }
+  return activeDays.map((day) => day.label).join(', ');
+};
+
+const buildServiceSummary = (calendar, trips) => {
+  if (!calendar?.length || !trips?.length) {
+    return { serviceDates: '', serviceDays: '' };
+  }
+  const calendarByService = new Map(calendar.map((entry) => [entry.service_id, entry]));
+  const service = calendarByService.get(trips[0].service_id);
+  if (!service) {
+    return { serviceDates: '', serviceDays: '' };
+  }
+  const startDate = formatDate(service.start_date);
+  const endDate = formatDate(service.end_date);
+  const serviceDates =
+    startDate && endDate ? `Horaires valables du ${startDate} au ${endDate}` : '';
+  const serviceDays = formatServiceDays(service);
+  return { serviceDates, serviceDays };
+};
 
 const loadGtfsFiles = (inputPath) => {
   const stats = fs.statSync(inputPath);
@@ -109,6 +192,20 @@ const formatTime = (timeValue) => {
   return `${hours.padStart(2, '0')}:${minutes.padStart(2, '0')}`;
 };
 
+const isMajorStop = (stopName, stopId, majorStops) => {
+  if (majorStops && majorStops.size) {
+    const normalizedName = normalizeStopValue(stopName);
+    const normalizedId = normalizeStopValue(stopId);
+    return (
+      (normalizedName && majorStops.has(normalizedName)) ||
+      (normalizedId && majorStops.has(normalizedId))
+    );
+  }
+  if (!stopName) return false;
+  const trimmed = stopName.trim();
+  return trimmed && trimmed === trimmed.toUpperCase();
+};
+
 const buildTimetables = (gtfs, options) => {
   const stopsById = new Map(gtfs.stops.map((stop) => [stop.stop_id, stop.stop_name]));
   const routesById = new Map(gtfs.routes.map((route) => [route.route_id, route]));
@@ -158,6 +255,7 @@ const buildTimetables = (gtfs, options) => {
     if (!selectedTrips.length) return;
     const baseTripStops = stopTimesByTrip.get(selectedTrips[0].trip_id);
     const stopOrder = baseTripStops.map((stopTime) => stopTime.stop_id);
+    const serviceSummary = buildServiceSummary(gtfs.calendar, selectedTrips);
 
     const rows = stopOrder.map((stopId) => {
       const row = [stopsById.get(stopId) || stopId];
@@ -176,112 +274,162 @@ const buildTimetables = (gtfs, options) => {
         'Stop',
         ...selectedTrips.map((trip) => trip.trip_headsign || trip.trip_id)
       ],
-      rows
+      rows,
+      stopIds: stopOrder,
+      majorStops: options.majorStops,
+      meta: serviceSummary
     });
   });
   return timetables;
 };
 
+const getColumnCount = (timetable) =>
+  timetable.rows[0]?.length || timetable.headers.length || 1;
+
 const writeHtml = (timetable, outputDir) => {
-  const routeName = timetable.route.route_short_name || timetable.route.route_long_name;
+  const routeNumber = timetable.route.route_short_name || timetable.route.route_id;
+  const routeTitle = timetable.route.route_long_name || timetable.route.route_id;
+  const routeSubtitle = timetable.route.route_long_name ? timetable.route.route_desc || '' : '';
+  const serviceDates = timetable.meta?.serviceDates;
+  const serviceDays = timetable.meta?.serviceDays;
   const fileName = `${timetable.route.route_id}.html`;
   const filePath = path.join(outputDir, fileName);
+  const columnCount = getColumnCount(timetable);
+  const columns = Array.from({ length: Math.max(columnCount - 1, 0) })
+    .map(() => '<col>')
+    .join('');
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>${routeName} Timetable</title>
+  <title>${escapeHtml(routeNumber)} Timetable</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; color: #1a1a1a; }
-    h1 { margin-bottom: 4px; }
-    .meta { margin-bottom: 16px; color: #555; }
-    table { border-collapse: collapse; width: 100%; font-size: 12px; }
-    th, td { border: 1px solid #333; padding: 4px 6px; text-align: center; }
-    th:first-child, td:first-child { text-align: left; }
-    thead { background: #f0f0f0; }
+    body { font-family: Arial, sans-serif; margin: 0; color: #111; background: #fff; }
+    .sheet { width: 595px; margin: 0 auto; padding: 24px 28px 32px; box-sizing: border-box; }
+    .header { display: flex; align-items: flex-start; gap: 16px; }
+    .route-number { font-size: 42px; font-weight: 700; line-height: 1; }
+    .route-title { font-size: 18px; font-weight: 700; text-transform: uppercase; }
+    .route-subtitle { font-size: 14px; font-weight: 600; margin-top: 4px; }
+    .service-dates { margin-top: 12px; font-size: 10px; font-weight: 600; }
+    .service-days { margin-top: 4px; font-size: 9px; }
+    .timetable { margin-top: 24px; border-collapse: collapse; width: 100%; font-size: 9px; table-layout: fixed; }
+    .timetable td { border: 1px solid #111; padding: 2px 4px; text-align: center; }
+    .timetable td:first-child { text-align: left; font-weight: 600; width: 160px; }
+    .timetable tr.major-stop td:first-child { font-weight: 700; text-transform: uppercase; }
   </style>
 </head>
 <body>
-  <h1>Route ${routeName} Timetable</h1>
-  <div class="meta">Generated ${new Date().toLocaleString()}</div>
-  <table>
-    <thead>
-      <tr>${timetable.headers.map((header) => `<th>${header}</th>`).join('')}</tr>
-    </thead>
-    <tbody>
-      ${timetable.rows
-        .map(
-          (row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`
-        )
-        .join('')}
-    </tbody>
-  </table>
+  <div class="sheet">
+    <div class="header">
+      <div class="route-number">${escapeHtml(routeNumber)}</div>
+      <div>
+        <div class="route-title">${escapeHtml(routeTitle)}</div>
+        ${routeSubtitle ? `<div class="route-subtitle">${escapeHtml(routeSubtitle)}</div>` : ''}
+      </div>
+    </div>
+    ${serviceDates ? `<div class="service-dates">${escapeHtml(serviceDates)}</div>` : ''}
+    ${serviceDays ? `<div class="service-days">${escapeHtml(serviceDays)}</div>` : ''}
+    <table class="timetable">
+      <colgroup>
+        <col class="stop-col">
+        ${columns}
+      </colgroup>
+      <tbody>
+        ${timetable.rows
+          .map((row, rowIndex) => {
+            const stopName = row[0];
+            const stopId = timetable.stopIds?.[rowIndex];
+            const rowClass = isMajorStop(stopName, stopId, timetable.majorStops)
+              ? ' class="major-stop"'
+              : '';
+            const cells = row
+              .map((cell) => `<td>${escapeHtml(cell).replace(/\n/g, '<br>')}</td>`)
+              .join('');
+            return `<tr${rowClass}>${cells}</tr>`;
+          })
+          .join('')}
+      </tbody>
+    </table>
+  </div>
 </body>
 </html>`;
   fs.writeFileSync(filePath, html, 'utf8');
   return filePath;
 };
 
-const drawPdfTable = (doc, timetable) => {
+const drawPdfTable = (doc, timetable, startY) => {
   const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-  const columnCount = timetable.headers.length;
-  const firstColumnWidth = Math.min(200, pageWidth * 0.35);
+  const columnCount = getColumnCount(timetable);
+  const firstColumnWidth = Math.min(180, pageWidth * 0.32);
   const otherColumnWidth =
     columnCount > 1 ? (pageWidth - firstColumnWidth) / (columnCount - 1) : pageWidth;
-  const columnWidths = timetable.headers.map((_, index) =>
+  const columnWidths = Array.from({ length: columnCount }, (_, index) =>
     index === 0 ? firstColumnWidth : otherColumnWidth
   );
 
-  const rowHeight = 20;
-  const cellPaddingX = 3;
-  const cellPaddingY = 4;
+  const rowHeight = 12;
+  const cellPaddingX = 2;
+  const cellPaddingY = 2;
   const cellPaddingWidth = cellPaddingX * 2;
-  const drawRow = (cells, startY, isHeader) => {
-    const font = isHeader ? 'Helvetica-Bold' : 'Helvetica';
-    doc.font(font).fontSize(8);
+  const drawRow = (cells, rowY, majorStop) => {
     let x = doc.page.margins.left;
     cells.forEach((cell, index) => {
       const width = columnWidths[index];
-      doc.rect(x, startY, width, rowHeight).stroke();
-      doc.text(String(cell), x + cellPaddingX, startY + cellPaddingY, {
+      doc.rect(x, rowY, width, rowHeight).stroke();
+      const cellText = String(cell);
+      const isStop = index === 0;
+      const isMajor = isStop && majorStop;
+      doc.font(isMajor ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5);
+      doc.text(cellText, x + cellPaddingX, rowY + cellPaddingY, {
         width: width - cellPaddingWidth,
-        align: 'center'
+        align: isStop ? 'left' : 'center'
       });
       x += width;
     });
   };
 
-  let y = doc.y + 10;
-  drawRow(timetable.headers, y, true);
-  y += rowHeight;
+  let y = startY;
+  doc.lineWidth(0.4);
 
-  timetable.rows.forEach((row) => {
+  timetable.rows.forEach((row, rowIndex) => {
     if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
       doc.addPage();
       y = doc.page.margins.top;
-      drawRow(timetable.headers, y, true);
-      y += rowHeight;
     }
-    drawRow(row, y, false);
+    const stopId = timetable.stopIds?.[rowIndex];
+    const majorStop = isMajorStop(row[0], stopId, timetable.majorStops);
+    drawRow(row, y, majorStop);
     y += rowHeight;
   });
 };
 
 const writePdf = (timetable, outputDir) => {
-  const routeName = timetable.route.route_short_name || timetable.route.route_long_name;
+  const routeNumber = timetable.route.route_short_name || timetable.route.route_id;
+  const routeTitle = timetable.route.route_long_name || timetable.route.route_id;
+  const routeSubtitle = timetable.route.route_long_name ? timetable.route.route_desc || '' : '';
+  const serviceDates = timetable.meta?.serviceDates;
+  const serviceDays = timetable.meta?.serviceDays;
   const fileName = `${timetable.route.route_id}.pdf`;
   const filePath = path.join(outputDir, fileName);
-  const doc = new PDFDocument({ margin: 32, size: 'A4', layout: 'landscape' });
+  const doc = new PDFDocument({ margin: 28, size: 'A4' });
   doc.pipe(fs.createWriteStream(filePath));
-  doc.font('Helvetica-Bold').fontSize(16).text(`Route ${routeName} Timetable`, {
-    align: 'center'
+  const headerLeft = doc.page.margins.left;
+  const headerTop = doc.page.margins.top;
+  doc.font('Helvetica-Bold').fontSize(42).text(routeNumber, headerLeft, headerTop, {
+    lineBreak: false
   });
-  doc.moveDown(0.5);
-  doc.font('Helvetica').fontSize(10).text(`Generated ${new Date().toLocaleString()}`, {
-    align: 'center'
-  });
-  doc.moveDown(0.5);
-  drawPdfTable(doc, timetable);
+  const titleX = headerLeft + doc.widthOfString(routeNumber) + 12;
+  doc.font('Helvetica-Bold').fontSize(16).text(routeTitle, titleX, headerTop + 8);
+  if (routeSubtitle) {
+    doc.font('Helvetica').fontSize(12).text(routeSubtitle, titleX, headerTop + 28);
+  }
+  if (serviceDates) {
+    doc.font('Helvetica-Bold').fontSize(9).text(serviceDates, headerLeft, headerTop + 80);
+  }
+  if (serviceDays) {
+    doc.font('Helvetica').fontSize(8).text(serviceDays, headerLeft, headerTop + 94);
+  }
+  drawPdfTable(doc, timetable, headerTop + 120);
   doc.end();
   return filePath;
 };
@@ -299,7 +447,8 @@ const main = () => {
     routes: parseCsv(files['routes.txt']),
     trips: parseCsv(files['trips.txt']),
     stops: parseCsv(files['stops.txt']),
-    stopTimes: parseCsv(files['stop_times.txt'])
+    stopTimes: parseCsv(files['stop_times.txt']),
+    calendar: files['calendar.txt'] ? parseCsv(files['calendar.txt']) : []
   };
   if (!gtfs.routes.length || !gtfs.trips.length) {
     throw new Error('GTFS feed is missing route or trip data.');

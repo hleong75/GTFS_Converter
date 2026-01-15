@@ -14,6 +14,7 @@ node index.js --input /path/to/gtfs.zip --output output
 - `--input` / `-i`: Path to a GTFS zip file or extracted folder (required)
 - `--output` / `-o`: Output directory (default: `output`)
 - `--route` / `-r`: Limit output to a route ID or `route_short_name`
+- `--major-stops`: Comma-separated stop IDs or names to emphasize as major stops
 - `--max-trips`: Limit the number of trips shown per timetable (default: 8)
 
 The converter writes one HTML and one PDF timetable for each route in the feed.
