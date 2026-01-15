@@ -11,20 +11,27 @@ const parseArgs = (argv) => {
   const args = { input: null, output: 'output', route: null, maxTrips: 8, help: false };
   for (let i = 2; i < argv.length; i += 1) {
     const value = argv[i];
+    const nextValue = () => {
+      if (i + 1 >= argv.length) {
+        throw new Error(`Missing value for ${value}`);
+      }
+      i += 1;
+      return argv[i];
+    };
     if (value === '--help' || value === '-h') {
       args.help = true;
     } else if (value === '--input' || value === '-i') {
-      args.input = argv[i + 1];
-      i += 1;
+      args.input = nextValue();
     } else if (value === '--output' || value === '-o') {
-      args.output = argv[i + 1];
-      i += 1;
+      args.output = nextValue();
     } else if (value === '--route' || value === '-r') {
-      args.route = argv[i + 1];
-      i += 1;
+      args.route = nextValue();
     } else if (value === '--max-trips') {
-      args.maxTrips = Number(argv[i + 1]);
-      i += 1;
+      const maxTrips = Number(nextValue());
+      if (!Number.isInteger(maxTrips) || maxTrips <= 0) {
+        throw new Error('Invalid value for --max-trips; expected a positive integer.');
+      }
+      args.maxTrips = maxTrips;
     }
   }
   return args;
@@ -86,14 +93,19 @@ const loadGtfsFiles = (inputPath) => {
 
 const timeToMinutes = (timeValue) => {
   if (!timeValue) return null;
-  const [hours, minutes] = timeValue.split(':').map((part) => Number(part));
+  const parts = timeValue.split(':');
+  if (parts.length < 2) return null;
+  const [hours, minutes] = parts.map((part) => Number(part));
   if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
   return hours * 60 + minutes;
 };
 
 const formatTime = (timeValue) => {
   if (!timeValue) return '';
-  const [hours, minutes] = timeValue.split(':');
+  const parts = timeValue.split(':');
+  if (parts.length < 2) return '';
+  const [hours, minutes] = parts;
+  if (typeof hours !== 'string' || typeof minutes !== 'string') return '';
   return `${hours.padStart(2, '0')}:${minutes.padStart(2, '0')}`;
 };
 
@@ -134,9 +146,10 @@ const buildTimetables = (gtfs, options) => {
     const sortedTrips = trips
       .map((trip) => {
         const firstStop = stopTimesByTrip.get(trip.trip_id)[0];
+        const startMinutes = firstStop ? timeToMinutes(firstStop.departure_time) : null;
         return {
           trip,
-          startMinutes: timeToMinutes(firstStop?.departure_time) ?? 0
+          startMinutes: startMinutes ?? 0
         };
       })
       .sort((a, b) => a.startMinutes - b.startMinutes)
@@ -220,6 +233,9 @@ const drawPdfTable = (doc, timetable) => {
   );
 
   const rowHeight = 20;
+  const cellPaddingX = 3;
+  const cellPaddingY = 4;
+  const cellPaddingWidth = cellPaddingX * 2;
   const drawRow = (cells, startY, isHeader) => {
     const font = isHeader ? 'Helvetica-Bold' : 'Helvetica';
     doc.font(font).fontSize(8);
@@ -227,7 +243,10 @@ const drawPdfTable = (doc, timetable) => {
     cells.forEach((cell, index) => {
       const width = columnWidths[index];
       doc.rect(x, startY, width, rowHeight).stroke();
-      doc.text(String(cell), x + 3, startY + 4, { width: width - 6, align: 'center' });
+      doc.text(String(cell), x + cellPaddingX, startY + cellPaddingY, {
+        width: width - cellPaddingWidth,
+        align: 'center'
+      });
       x += width;
     });
   };
