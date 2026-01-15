@@ -306,15 +306,17 @@ const writeHtml = (timetable, outputDir) => {
   <style>
     body { font-family: Arial, sans-serif; margin: 0; color: #111; background: #fff; }
     .sheet { width: 595px; margin: 0 auto; padding: 24px 28px 32px; box-sizing: border-box; }
-    .header { display: flex; align-items: flex-start; gap: 16px; }
-    .route-number { font-size: 42px; font-weight: 700; line-height: 1; }
-    .route-title { font-size: 18px; font-weight: 700; text-transform: uppercase; }
-    .route-subtitle { font-size: 14px; font-weight: 600; margin-top: 4px; }
-    .service-dates { margin-top: 12px; font-size: 10px; font-weight: 600; }
-    .service-days { margin-top: 4px; font-size: 9px; }
-    .timetable { margin-top: 24px; border-collapse: collapse; width: 100%; font-size: 9px; table-layout: fixed; }
-    .timetable td { border: 1px solid #111; padding: 2px 4px; text-align: center; }
+    .header { display: flex; align-items: center; gap: 16px; padding-bottom: 10px; border-bottom: 2px solid #111; }
+    .route-number { font-size: 40px; font-weight: 700; line-height: 1; color: #fff; background: #111; padding: 6px 12px; border-radius: 4px; min-width: 64px; text-align: center; }
+    .route-title { font-size: 18px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+    .route-subtitle { font-size: 13px; font-weight: 600; margin-top: 4px; color: #333; }
+    .service-dates { margin-top: 12px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+    .service-days { margin-top: 4px; font-size: 9px; color: #333; }
+    .timetable { margin-top: 18px; border-collapse: collapse; width: 100%; font-size: 9px; table-layout: fixed; border: 1px solid #111; }
+    .timetable td { border: 1px solid #222; padding: 2px 4px; text-align: center; }
     .timetable td:first-child { text-align: left; font-weight: 600; width: 160px; }
+    .timetable tr:nth-child(even) td { background: #f5f5f5; }
+    .timetable tr.major-stop td { background: #e7e7e7; }
     .timetable tr.major-stop td:first-child { font-weight: 700; text-transform: uppercase; }
   </style>
 </head>
@@ -367,11 +369,18 @@ const drawPdfTable = (doc, timetable, startY) => {
     index === 0 ? firstColumnWidth : otherColumnWidth
   );
 
-  const rowHeight = 12;
+  const rowHeight = 13;
   const cellPaddingX = 2;
   const cellPaddingY = 2;
   const cellPaddingWidth = cellPaddingX * 2;
-  const drawRow = (cells, rowY, majorStop) => {
+  const drawRow = (cells, rowY, majorStop, rowIndex) => {
+    const rowWidth = columnWidths.reduce((total, width) => total + width, 0);
+    const baseColor = majorStop ? '#e7e7e7' : rowIndex % 2 === 1 ? '#f5f5f5' : null;
+    if (baseColor) {
+      doc.save();
+      doc.fillColor(baseColor).rect(doc.page.margins.left, rowY, rowWidth, rowHeight).fill();
+      doc.restore();
+    }
     let x = doc.page.margins.left;
     cells.forEach((cell, index) => {
       const width = columnWidths[index];
@@ -389,7 +398,7 @@ const drawPdfTable = (doc, timetable, startY) => {
   };
 
   let y = startY;
-  doc.lineWidth(0.4);
+  doc.lineWidth(0.5).strokeColor('#111');
 
   timetable.rows.forEach((row, rowIndex) => {
     if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
@@ -398,7 +407,7 @@ const drawPdfTable = (doc, timetable, startY) => {
     }
     const stopId = timetable.stopIds?.[rowIndex];
     const majorStop = isMajorStop(row[0], stopId, timetable.majorStops);
-    drawRow(row, y, majorStop);
+    drawRow(row, y, majorStop, rowIndex);
     y += rowHeight;
   });
 };
@@ -415,21 +424,35 @@ const writePdf = (timetable, outputDir) => {
   doc.pipe(fs.createWriteStream(filePath));
   const headerLeft = doc.page.margins.left;
   const headerTop = doc.page.margins.top;
-  doc.font('Helvetica-Bold').fontSize(42).text(routeNumber, headerLeft, headerTop, {
-    lineBreak: false
-  });
-  const titleX = headerLeft + doc.widthOfString(routeNumber) + 12;
-  doc.font('Helvetica-Bold').fontSize(16).text(routeTitle, titleX, headerTop + 8);
+  const badgePadding = 10;
+  doc.font('Helvetica-Bold').fontSize(38);
+  const badgeTextWidth = doc.widthOfString(routeNumber);
+  const badgeWidth = Math.max(64, badgeTextWidth + badgePadding * 2);
+  const badgeHeight = 46;
+  doc.rect(headerLeft, headerTop, badgeWidth, badgeHeight).fill('#111');
+  doc
+    .fillColor('#fff')
+    .font('Helvetica-Bold')
+    .fontSize(34)
+    .text(routeNumber, headerLeft, headerTop + 7, { width: badgeWidth, align: 'center' });
+  doc.fillColor('#111');
+  const titleX = headerLeft + badgeWidth + 12;
+  doc.font('Helvetica-Bold').fontSize(16).text(routeTitle, titleX, headerTop + 10);
   if (routeSubtitle) {
-    doc.font('Helvetica').fontSize(12).text(routeSubtitle, titleX, headerTop + 28);
+    doc.font('Helvetica').fontSize(12).text(routeSubtitle, titleX, headerTop + 30);
   }
+  const headerLineY = headerTop + 68;
+  doc.moveTo(headerLeft, headerLineY).lineTo(doc.page.width - doc.page.margins.right, headerLineY).stroke();
   if (serviceDates) {
-    doc.font('Helvetica-Bold').fontSize(9).text(serviceDates, headerLeft, headerTop + 80);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(9)
+      .text(serviceDates.toUpperCase(), headerLeft, headerTop + 78);
   }
   if (serviceDays) {
-    doc.font('Helvetica').fontSize(8).text(serviceDays, headerLeft, headerTop + 94);
+    doc.font('Helvetica').fontSize(8).text(serviceDays, headerLeft, headerTop + 92);
   }
-  drawPdfTable(doc, timetable, headerTop + 120);
+  drawPdfTable(doc, timetable, headerTop + 110);
   doc.end();
   return filePath;
 };
