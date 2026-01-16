@@ -85,7 +85,7 @@ const parseCsvStream = (stream, onRecord, transformRecord) =>
       let record;
       while ((record = parser.read()) !== null) {
         const mappedRecord = transformRecord ? transformRecord(record) : record;
-        if (mappedRecord == null) {
+        if (mappedRecord === null || mappedRecord === undefined) {
           continue;
         }
         if (onRecord) {
@@ -332,16 +332,7 @@ const buildTimetables = (gtfs, options) => {
     }
     tripsByRoute.get(trip.route_id).push(trip);
   });
-  const hasStopTimesMap = gtfs.stopTimesByTrip instanceof Map;
-  const stopTimesByTrip = hasStopTimesMap ? gtfs.stopTimesByTrip : new Map();
-  if (!hasStopTimesMap && Array.isArray(gtfs.stopTimes)) {
-    gtfs.stopTimes.forEach((stopTime) => {
-      if (!stopTimesByTrip.has(stopTime.trip_id)) {
-        stopTimesByTrip.set(stopTime.trip_id, []);
-      }
-      stopTimesByTrip.get(stopTime.trip_id).push(stopTime);
-    });
-  }
+  const stopTimesByTrip = gtfs.stopTimesByTrip instanceof Map ? gtfs.stopTimesByTrip : new Map();
   stopTimesByTrip.forEach((times) => {
     times.sort((a, b) => Number(a.stop_sequence) - Number(b.stop_sequence));
   });
@@ -682,9 +673,10 @@ const main = async () => {
         fs.createReadStream(files['stop_times.txt']),
         (record) => {
           if (relevantTripIds.has(record.trip_id)) {
-            const times = stopTimesByTrip.get(record.trip_id) || [];
-            times.push(record);
-            stopTimesByTrip.set(record.trip_id, times);
+            if (!stopTimesByTrip.has(record.trip_id)) {
+              stopTimesByTrip.set(record.trip_id, []);
+            }
+            stopTimesByTrip.get(record.trip_id).push(record);
           }
         },
         (record) => ({
