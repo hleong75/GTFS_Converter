@@ -85,7 +85,7 @@ const parseCsvStream = (stream, onRecord, transformRecord) =>
       let record;
       while ((record = parser.read()) !== null) {
         const mappedRecord = transformRecord ? transformRecord(record) : record;
-        if (mappedRecord === null || mappedRecord === undefined) {
+        if (mappedRecord == null) {
           continue;
         }
         if (onRecord) {
@@ -332,7 +332,10 @@ const buildTimetables = (gtfs, options) => {
     }
     tripsByRoute.get(trip.route_id).push(trip);
   });
-  const stopTimesByTrip = gtfs.stopTimesByTrip instanceof Map ? gtfs.stopTimesByTrip : new Map();
+  if (!(gtfs.stopTimesByTrip instanceof Map)) {
+    throw new Error('Stop times must be provided as a map to build timetables.');
+  }
+  const stopTimesByTrip = gtfs.stopTimesByTrip;
   stopTimesByTrip.forEach((times) => {
     times.sort((a, b) => Number(a.stop_sequence) - Number(b.stop_sequence));
   });
