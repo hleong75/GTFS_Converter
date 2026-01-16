@@ -80,6 +80,7 @@ const parseCsvStream = (stream) =>
       skip_empty_lines: true,
       trim: true
     });
+    stream.on('error', reject);
     parser.on('readable', () => {
       let record;
       while ((record = parser.read()) !== null) {
@@ -88,7 +89,6 @@ const parseCsvStream = (stream) =>
     });
     parser.on('error', reject);
     parser.on('end', () => resolve(records));
-    stream.on('error', reject);
     stream.pipe(parser);
   });
 
@@ -174,8 +174,27 @@ const loadGtfsFiles = (inputPath) => {
     return { files, cleanup: null };
   }
   const zip = new AdmZip(inputPath);
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gtfs-'));
+  const previousUmask = process.umask(0o077);
+  let tempDir;
+  try {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gtfs-'));
+  } finally {
+    process.umask(previousUmask);
+  }
   zip.extractAllTo(tempDir, true);
+  const cleanupTempDir = () => {
+    try {
+      if (fs.rmSync) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } else {
+        fs.rmdirSync(tempDir, { recursive: true });
+      }
+    } catch (cleanupError) {
+      console.warn(
+        `Warning: Unable to remove temporary GTFS directory (${tempDir}): ${cleanupError.message}`
+      );
+    }
+  };
   try {
     REQUIRED_FILES.forEach((file) => {
       const filePath = path.join(tempDir, file);
@@ -189,12 +208,12 @@ const loadGtfsFiles = (inputPath) => {
       files['calendar.txt'] = calendarPath;
     }
   } catch (error) {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    cleanupTempDir();
     throw error;
   }
   return {
     files,
-    cleanup: () => fs.rmSync(tempDir, { recursive: true, force: true })
+    cleanup: cleanupTempDir
   };
 };
 
