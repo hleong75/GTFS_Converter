@@ -109,6 +109,7 @@ const DAY_LABELS = [
   { key: 'saturday', label: 'samedi' },
   { key: 'sunday', label: 'dimanche' }
 ];
+const FALLBACK_SERVICE_ID = 'no-service-id';
 
 const escapeHtml = (value) =>
   String(value)
@@ -363,7 +364,7 @@ const buildTimetables = (gtfs, options) => {
     });
     const tripsByService = new Map();
     tripEntries.forEach((entry) => {
-      const serviceKey = entry.trip.service_id || 'default';
+      const serviceKey = entry.trip.service_id || FALLBACK_SERVICE_ID;
       if (!tripsByService.has(serviceKey)) {
         tripsByService.set(serviceKey, []);
       }
