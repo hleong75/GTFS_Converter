@@ -85,7 +85,7 @@ const parseCsvStream = (stream, onRecord, transformRecord) =>
       let record;
       while ((record = parser.read()) !== null) {
         const mappedRecord = transformRecord ? transformRecord(record) : record;
-        if (mappedRecord == null) {
+        if (mappedRecord === null || mappedRecord === undefined) {
           continue;
         }
         if (onRecord) {
@@ -333,7 +333,9 @@ const buildTimetables = (gtfs, options) => {
     tripsByRoute.get(trip.route_id).push(trip);
   });
   if (!(gtfs.stopTimesByTrip instanceof Map)) {
-    throw new Error('Stop times must be provided as a map to build timetables.');
+    throw new Error(
+      'Stop times must be provided as a Map keyed by trip_id with arrays of stop times to build timetables.'
+    );
   }
   const stopTimesByTrip = gtfs.stopTimesByTrip;
   stopTimesByTrip.forEach((times) => {
@@ -675,20 +677,23 @@ const main = async () => {
       await parseCsvStream(
         fs.createReadStream(files['stop_times.txt']),
         (record) => {
-          if (relevantTripIds.has(record.trip_id)) {
-            if (!stopTimesByTrip.has(record.trip_id)) {
-              stopTimesByTrip.set(record.trip_id, []);
-            }
-            stopTimesByTrip.get(record.trip_id).push(record);
+          if (!stopTimesByTrip.has(record.trip_id)) {
+            stopTimesByTrip.set(record.trip_id, []);
           }
+          stopTimesByTrip.get(record.trip_id).push(record);
         },
-        (record) => ({
-          trip_id: record.trip_id,
-          stop_id: record.stop_id,
-          arrival_time: record.arrival_time,
-          departure_time: record.departure_time,
-          stop_sequence: record.stop_sequence
-        })
+        (record) => {
+          if (!relevantTripIds.has(record.trip_id)) {
+            return null;
+          }
+          return {
+            trip_id: record.trip_id,
+            stop_id: record.stop_id,
+            arrival_time: record.arrival_time,
+            departure_time: record.departure_time,
+            stop_sequence: record.stop_sequence
+          };
+        }
       );
     }
     const gtfs = {
