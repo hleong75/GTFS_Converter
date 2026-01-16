@@ -311,7 +311,7 @@ const buildTimetables = (gtfs, options) => {
       .filter((agency) => agency.agency_id && agency.agency_name)
       .map((agency) => [agency.agency_id, agency.agency_name])
   );
-  const defaultAgencyName = agencies.length === 1 ? agencies[0].agency_name : '';
+  const defaultAgencyName = agencies.length === 1 ? agencies[0]?.agency_name || '' : '';
   const tripsByRoute = new Map();
   gtfs.trips.forEach((trip) => {
     if (!tripsByRoute.has(trip.route_id)) {
@@ -402,7 +402,7 @@ const buildOutputBaseName = (timetable) => {
   if (sanitized.length) {
     return sanitized.join('-');
   }
-  return sanitizeFileComponent(routeIdentifier || timetable.route.route_id || 'timetable') || 'timetable';
+  return sanitizeFileComponent(routeIdentifier || timetable.route.route_id) || 'timetable';
 };
 
 const writeHtml = (timetable, outputDir) => {
