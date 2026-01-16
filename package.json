@@ -1,0 +1,20 @@
+{
+  "name": "gtfs-converter",
+  "version": "1.0.0",
+  "description": "Convert GTFS feeds into HTML and PDF timetables.",
+  "main": "index.js",
+  "bin": {
+    "gtfs-converter": "index.js"
+  },
+  "scripts": {
+    "test": "node index.js --help"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "csv-parse": "^6.1.0",
+    "pdfkit": "^0.17.2"
+  }
+}
