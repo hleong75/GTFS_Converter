@@ -68,7 +68,7 @@ Options:
   -o, --output      Output directory for HTML/PDF files (default: output)
   -r, --route       Only render a specific route by route_id or short_name
   --major-stops     Comma-separated stop IDs or names to emphasize as major stops
-  --max-trips       Maximum trips to include per timetable (default: 8)
+  --max-trips       Maximum trips to include per timetable page (default: 8)
   -h, --help        Show this help message
 `);
 };
@@ -109,6 +109,7 @@ const DAY_LABELS = [
   { key: 'saturday', label: 'samedi' },
   { key: 'sunday', label: 'dimanche' }
 ];
+const FALLBACK_SERVICE_ID = 'no-service-id';
 
 const escapeHtml = (value) =>
   String(value)
@@ -277,8 +278,6 @@ const timeToMinutes = (timeValue) => {
   return hours * 60 + minutes;
 };
 
-const normalizeStartMinutes = (minutes) => (minutes == null ? 0 : minutes);
-
 const formatTime = (timeValue) => {
   if (!timeValue) return '';
   const parts = timeValue.split(':');
@@ -300,6 +299,16 @@ const isMajorStop = (stopName, stopId, majorStops) => {
   if (!stopName) return false;
   const trimmed = stopName.trim();
   return trimmed && trimmed === trimmed.toUpperCase();
+};
+
+const chunkTrips = (items, chunkSize) => {
+  if (!items || !items.length) return [];
+  const size = Number.isInteger(chunkSize) && chunkSize > 0 ? chunkSize : items.length;
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 };
 
 const buildTimetables = (gtfs, options) => {
@@ -343,50 +352,66 @@ const buildTimetables = (gtfs, options) => {
       stopTimesByTrip.has(trip.trip_id)
     );
     if (!trips.length) return;
-    const sortedTrips = trips
-      .map((trip) => {
-        const firstStop = stopTimesByTrip.get(trip.trip_id)[0];
-        const startMinutes = firstStop
-          ? timeToMinutes(firstStop.departure_time || firstStop.arrival_time)
-          : null;
-        return {
-          trip,
-          startMinutes: startMinutes ?? 0
-        };
-      })
-      .sort((a, b) => a.startMinutes - b.startMinutes)
-      .slice(0, options.maxTrips);
-    const selectedTrips = sortedTrips.map((entry) => entry.trip);
-    if (!selectedTrips.length) return;
-    const baseTripStops = stopTimesByTrip.get(selectedTrips[0].trip_id);
-    const stopOrder = baseTripStops.map((stopTime) => stopTime.stop_id);
-    const serviceSummary = buildServiceSummary(gtfs.calendar, selectedTrips);
-
-    const rows = stopOrder.map((stopId) => {
-      const row = [stopsById.get(stopId) || stopId];
-      selectedTrips.forEach((trip) => {
-        const timeEntry = stopTimesByTrip
-          .get(trip.trip_id)
-          .find((stopTime) => stopTime.stop_id === stopId);
-        row.push(formatTime(timeEntry?.departure_time || timeEntry?.arrival_time || ''));
-      });
-      return row;
+    const tripEntries = trips.map((trip) => {
+      const firstStop = stopTimesByTrip.get(trip.trip_id)[0];
+      const startMinutes = firstStop
+        ? timeToMinutes(firstStop.departure_time || firstStop.arrival_time)
+        : null;
+      return {
+        trip,
+        startMinutes: startMinutes ?? 0
+      };
     });
+    const tripsByService = new Map();
+    tripEntries.forEach((entry) => {
+      const serviceKey = entry.trip.service_id || FALLBACK_SERVICE_ID;
+      if (!tripsByService.has(serviceKey)) {
+        tripsByService.set(serviceKey, []);
+      }
+      tripsByService.get(serviceKey).push(entry);
+    });
+    const includeServiceId = tripsByService.size > 1;
     const agencyName = route.agency_id
       ? agenciesById.get(route.agency_id) || defaultAgencyName
       : defaultAgencyName;
 
-    timetables.push({
-      route,
-      agencyName,
-      headers: [
-        'Stop',
-        ...selectedTrips.map((trip) => trip.trip_headsign || trip.trip_id)
-      ],
-      rows,
-      stopIds: stopOrder,
-      majorStops: options.majorStops,
-      meta: serviceSummary
+    tripsByService.forEach((serviceEntries, serviceKey) => {
+      serviceEntries.sort((a, b) => a.startMinutes - b.startMinutes);
+      const serviceTrips = serviceEntries.map((entry) => entry.trip);
+      if (!serviceTrips.length) return;
+      const baseTripStops = stopTimesByTrip.get(serviceTrips[0].trip_id);
+      if (!baseTripStops) return;
+      const stopOrder = baseTripStops.map((stopTime) => stopTime.stop_id);
+      const serviceSummary = buildServiceSummary(gtfs.calendar, serviceTrips);
+      const tripChunks = chunkTrips(serviceEntries, options.maxTrips);
+      tripChunks.forEach((chunk, chunkIndex) => {
+        const selectedTrips = chunk.map((entry) => entry.trip);
+        const rows = stopOrder.map((stopId) => {
+          const row = [stopsById.get(stopId) || stopId];
+          selectedTrips.forEach((trip) => {
+            const timeEntry = stopTimesByTrip
+              .get(trip.trip_id)
+              .find((stopTime) => stopTime.stop_id === stopId);
+            row.push(formatTime(timeEntry?.departure_time || timeEntry?.arrival_time || ''));
+          });
+          return row;
+        });
+        timetables.push({
+          route,
+          agencyName,
+          headers: [
+            'Stop',
+            ...selectedTrips.map((trip) => trip.trip_headsign || trip.trip_id)
+          ],
+          rows,
+          stopIds: stopOrder,
+          majorStops: options.majorStops,
+          meta: serviceSummary,
+          serviceId: includeServiceId ? serviceKey : '',
+          pageIndex: chunkIndex + 1,
+          pageCount: tripChunks.length
+        });
+      });
     });
   });
   return timetables;
@@ -398,6 +423,12 @@ const getColumnCount = (timetable) =>
 const buildOutputBaseName = (timetable) => {
   const routeIdentifier = timetable.route.route_short_name || timetable.route.route_id;
   const parts = [routeIdentifier, timetable.agencyName].filter(Boolean);
+  if (timetable.serviceId) {
+    parts.push(timetable.serviceId);
+  }
+  if (timetable.pageCount > 1) {
+    parts.push(`page-${timetable.pageIndex}`);
+  }
   const sanitized = parts.map((part) => sanitizeFileComponent(part)).filter(Boolean);
   if (sanitized.length) {
     return sanitized.join('-');
@@ -609,44 +640,11 @@ const main = async () => {
         .map((route) => route.route_id)
     );
     const relevantTrips = trips.filter((trip) => routeIdsToRender.has(trip.route_id));
-    const tripsById = new Map(relevantTrips.map((trip) => [trip.trip_id, trip]));
-    const tripStartTimes = new Map();
-    if (tripsById.size) {
-      await parseCsvStream(fs.createReadStream(files['stop_times.txt']), (record) => {
-        if (!tripsById.has(record.trip_id)) return;
-        const sequence = Number(record.stop_sequence);
-        if (!Number.isFinite(sequence)) return;
-        const timeValue = record.departure_time || record.arrival_time;
-        const startMinutes = normalizeStartMinutes(timeToMinutes(timeValue));
-        const existing = tripStartTimes.get(record.trip_id);
-        if (!existing || sequence < existing.sequence) {
-          tripStartTimes.set(record.trip_id, { sequence, startMinutes });
-        }
-      });
-    }
-    const selectedTripIds = new Set();
-    const tripsByRoute = new Map();
-    relevantTrips.forEach((trip) => {
-      if (!tripStartTimes.has(trip.trip_id)) return;
-      if (!tripsByRoute.has(trip.route_id)) {
-        tripsByRoute.set(trip.route_id, []);
-      }
-      tripsByRoute.get(trip.route_id).push(trip);
-    });
-    tripsByRoute.forEach((routeTrips) => {
-      const sortedTrips = routeTrips
-        .map((trip) => ({
-          trip,
-          startMinutes: normalizeStartMinutes(tripStartTimes.get(trip.trip_id)?.startMinutes)
-        }))
-        .sort((a, b) => a.startMinutes - b.startMinutes)
-        .slice(0, args.maxTrips);
-      sortedTrips.forEach(({ trip }) => selectedTripIds.add(trip.trip_id));
-    });
+    const relevantTripIds = new Set(relevantTrips.map((trip) => trip.trip_id));
     const stopTimes = [];
-    if (selectedTripIds.size) {
+    if (relevantTripIds.size) {
       await parseCsvStream(fs.createReadStream(files['stop_times.txt']), (record) => {
-        if (selectedTripIds.has(record.trip_id)) {
+        if (relevantTripIds.has(record.trip_id)) {
           stopTimes.push(record);
         }
       });
