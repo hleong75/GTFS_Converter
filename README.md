@@ -17,4 +17,5 @@ node index.js --input /path/to/gtfs.zip --output output
 - `--major-stops`: Comma-separated stop IDs or names to emphasize as major stops
 - `--max-trips`: Limit the number of trips shown per timetable (default: 8)
 
-The converter writes one HTML and one PDF timetable for each route in the feed.
+The converter writes one HTML and one PDF timetable for each route in the feed. Output files
+use the route short name/ID plus the agency name when available (for example, `482-Agency.pdf`).

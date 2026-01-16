@@ -7,6 +7,7 @@ const PDFDocument = require('pdfkit');
 const os = require('os');
 
 const REQUIRED_FILES = ['routes.txt', 'trips.txt', 'stops.txt', 'stop_times.txt'];
+const OPTIONAL_FILES = ['agency.txt', 'calendar.txt'];
 
 const normalizeStopValue = (value) => {
   if (!value) return '';
@@ -117,6 +118,16 @@ const escapeHtml = (value) =>
     .replace(/\"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
+const sanitizeFileComponent = (value) => {
+  if (!value) return '';
+  return String(value)
+    .trim()
+    .replace(/[\\/:"*?<>|]+/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+};
+
 const formatDate = (dateValue) => {
   if (!dateValue || dateValue.length !== 8) return dateValue || '';
   const year = dateValue.slice(0, 4);
@@ -174,10 +185,12 @@ const loadGtfsFiles = (inputPath) => {
       }
       files[file] = filePath;
     });
-    const calendarPath = path.join(inputPath, 'calendar.txt');
-    if (fs.existsSync(calendarPath)) {
-      files['calendar.txt'] = calendarPath;
-    }
+    OPTIONAL_FILES.forEach((file) => {
+      const optionalPath = path.join(inputPath, file);
+      if (fs.existsSync(optionalPath)) {
+        files[file] = optionalPath;
+      }
+    });
     return { files, cleanup: null };
   }
   const zip = new AdmZip(inputPath);
@@ -239,10 +252,12 @@ const loadGtfsFiles = (inputPath) => {
       }
       files[file] = filePath;
     });
-    const calendarPath = path.join(tempDir, 'calendar.txt');
-    if (fs.existsSync(calendarPath)) {
-      files['calendar.txt'] = calendarPath;
-    }
+    OPTIONAL_FILES.forEach((file) => {
+      const optionalPath = path.join(tempDir, file);
+      if (fs.existsSync(optionalPath)) {
+        files[file] = optionalPath;
+      }
+    });
   } catch (error) {
     cleanupTempDir();
     throw error;
@@ -290,6 +305,13 @@ const isMajorStop = (stopName, stopId, majorStops) => {
 const buildTimetables = (gtfs, options) => {
   const stopsById = new Map(gtfs.stops.map((stop) => [stop.stop_id, stop.stop_name]));
   const routesById = new Map(gtfs.routes.map((route) => [route.route_id, route]));
+  const agencies = gtfs.agencies || [];
+  const agenciesById = new Map(
+    agencies
+      .filter((agency) => agency.agency_id && agency.agency_name)
+      .map((agency) => [agency.agency_id, agency.agency_name])
+  );
+  const defaultAgencyName = agencies.length === 1 ? agencies[0].agency_name : '';
   const tripsByRoute = new Map();
   gtfs.trips.forEach((trip) => {
     if (!tripsByRoute.has(trip.route_id)) {
@@ -324,7 +346,9 @@ const buildTimetables = (gtfs, options) => {
     const sortedTrips = trips
       .map((trip) => {
         const firstStop = stopTimesByTrip.get(trip.trip_id)[0];
-        const startMinutes = firstStop ? timeToMinutes(firstStop.departure_time) : null;
+        const startMinutes = firstStop
+          ? timeToMinutes(firstStop.departure_time || firstStop.arrival_time)
+          : null;
         return {
           trip,
           startMinutes: startMinutes ?? 0
@@ -344,13 +368,17 @@ const buildTimetables = (gtfs, options) => {
         const timeEntry = stopTimesByTrip
           .get(trip.trip_id)
           .find((stopTime) => stopTime.stop_id === stopId);
-        row.push(formatTime(timeEntry?.arrival_time || timeEntry?.departure_time || ''));
+        row.push(formatTime(timeEntry?.departure_time || timeEntry?.arrival_time || ''));
       });
       return row;
     });
+    const agencyName = route.agency_id
+      ? agenciesById.get(route.agency_id) || defaultAgencyName
+      : defaultAgencyName;
 
     timetables.push({
       route,
+      agencyName,
       headers: [
         'Stop',
         ...selectedTrips.map((trip) => trip.trip_headsign || trip.trip_id)
@@ -367,13 +395,23 @@ const buildTimetables = (gtfs, options) => {
 const getColumnCount = (timetable) =>
   timetable.rows[0]?.length || timetable.headers.length || 1;
 
+const buildOutputBaseName = (timetable) => {
+  const routeIdentifier = timetable.route.route_short_name || timetable.route.route_id;
+  const parts = [routeIdentifier, timetable.agencyName].filter(Boolean);
+  const sanitized = parts.map((part) => sanitizeFileComponent(part)).filter(Boolean);
+  if (sanitized.length) {
+    return sanitized.join('-');
+  }
+  return sanitizeFileComponent(routeIdentifier || timetable.route.route_id || 'timetable') || 'timetable';
+};
+
 const writeHtml = (timetable, outputDir) => {
   const routeNumber = timetable.route.route_short_name || timetable.route.route_id;
   const routeTitle = timetable.route.route_long_name || timetable.route.route_id;
   const routeSubtitle = timetable.route.route_long_name ? timetable.route.route_desc || '' : '';
   const serviceDates = timetable.meta?.serviceDates;
   const serviceDays = timetable.meta?.serviceDays;
-  const fileName = `${timetable.route.route_id}.html`;
+  const fileName = `${buildOutputBaseName(timetable)}.html`;
   const filePath = path.join(outputDir, fileName);
   const columnCount = getColumnCount(timetable);
   const columns = Array.from({ length: Math.max(columnCount - 1, 0) })
@@ -499,7 +537,7 @@ const writePdf = (timetable, outputDir) => {
   const routeSubtitle = timetable.route.route_long_name ? timetable.route.route_desc || '' : '';
   const serviceDates = timetable.meta?.serviceDates;
   const serviceDays = timetable.meta?.serviceDays;
-  const fileName = `${timetable.route.route_id}.pdf`;
+  const fileName = `${buildOutputBaseName(timetable)}.pdf`;
   const filePath = path.join(outputDir, fileName);
   const doc = new PDFDocument({ margin: 28, size: 'A4' });
   doc.pipe(fs.createWriteStream(filePath));
@@ -553,6 +591,9 @@ const main = async () => {
     if (!routes.length || !trips.length) {
       throw new Error('GTFS feed is missing route or trip data.');
     }
+    const agencies = files['agency.txt']
+      ? await parseCsv(fs.createReadStream(files['agency.txt']))
+      : [];
     const stops = await parseCsv(fs.createReadStream(files['stops.txt']));
     const calendar = files['calendar.txt']
       ? await parseCsv(fs.createReadStream(files['calendar.txt']))
@@ -611,6 +652,7 @@ const main = async () => {
       });
     }
     const gtfs = {
+      agencies,
       routes,
       trips,
       stops,
