@@ -85,7 +85,7 @@ const parseCsvStream = (stream, onRecord, transformRecord) =>
       let record;
       while ((record = parser.read()) !== null) {
         const mappedRecord = transformRecord ? transformRecord(record) : record;
-        if (mappedRecord == null) {
+        if (mappedRecord === null || mappedRecord === undefined) {
           continue;
         }
         if (onRecord) {
@@ -681,14 +681,13 @@ const main = async () => {
       await parseCsvStream(
         fs.createReadStream(files['stop_times.txt']),
         (record) => {
-          if (!relevantTripIds.has(record.trip_id)) {
-            return;
-          }
-          const existing = stopTimesByTrip.get(record.trip_id);
-          if (existing) {
-            existing.push(record);
-          } else {
-            stopTimesByTrip.set(record.trip_id, [record]);
+          if (relevantTripIds.has(record.trip_id)) {
+            const existing = stopTimesByTrip.get(record.trip_id);
+            if (existing) {
+              existing.push(record);
+            } else {
+              stopTimesByTrip.set(record.trip_id, [record]);
+            }
           }
         },
         (record) => ({
