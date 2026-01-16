@@ -2,8 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
-const { parse } = require('csv-parse/sync');
+const { parse } = require('csv-parse');
 const PDFDocument = require('pdfkit');
+const os = require('os');
 
 const REQUIRED_FILES = ['routes.txt', 'trips.txt', 'stops.txt', 'stop_times.txt'];
 
@@ -71,12 +72,32 @@ Options:
 `);
 };
 
-const parseCsv = (content) =>
-  parse(content, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true
+const parseCsvStream = (stream, onRecord) =>
+  new Promise((resolve, reject) => {
+    const parser = parse({
+      columns: true,
+      skip_empty_lines: true,
+      trim: true
+    });
+    stream.on('error', reject);
+    parser.on('readable', () => {
+      let record;
+      while ((record = parser.read()) !== null) {
+        if (onRecord) {
+          onRecord(record);
+        }
+      }
+    });
+    parser.on('error', reject);
+    parser.on('end', () => resolve());
+    stream.pipe(parser);
   });
+
+const parseCsv = async (stream) => {
+  const records = [];
+  await parseCsvStream(stream, (record) => records.push(record));
+  return records;
+};
 
 const DAY_LABELS = [
   { key: 'monday', label: 'lundi' },
@@ -151,27 +172,85 @@ const loadGtfsFiles = (inputPath) => {
       if (!fs.existsSync(filePath)) {
         throw new Error(`Missing required GTFS file: ${file}`);
       }
-      files[file] = fs.readFileSync(filePath, 'utf8');
+      files[file] = filePath;
     });
     const calendarPath = path.join(inputPath, 'calendar.txt');
     if (fs.existsSync(calendarPath)) {
-      files['calendar.txt'] = fs.readFileSync(calendarPath, 'utf8');
+      files['calendar.txt'] = calendarPath;
     }
-  } else {
-    const zip = new AdmZip(inputPath);
-    REQUIRED_FILES.forEach((file) => {
-      const entry = zip.getEntry(file);
-      if (!entry) {
-        throw new Error(`Missing required GTFS file in zip: ${file}`);
-      }
-      files[file] = entry.getData().toString('utf8');
-    });
-    const calendarEntry = zip.getEntry('calendar.txt');
-    if (calendarEntry) {
-      files['calendar.txt'] = calendarEntry.getData().toString('utf8');
-    }
+    return { files, cleanup: null };
   }
-  return files;
+  const zip = new AdmZip(inputPath);
+  const previousUmask = process.umask(0o077);
+  let tempDir;
+  try {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gtfs-'));
+  } finally {
+    process.umask(previousUmask);
+  }
+  const removeDirectory = (directory) => {
+    if (!directory || !fs.existsSync(directory)) {
+      return;
+    }
+    if (fs.rmSync) {
+      fs.rmSync(directory, { recursive: true, force: true });
+      return;
+    }
+    let lastError;
+    fs.readdirSync(directory, { withFileTypes: true }).forEach((entry) => {
+      const entryPath = path.join(directory, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          removeDirectory(entryPath);
+        } else {
+          fs.unlinkSync(entryPath);
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    });
+    try {
+      fs.rmdirSync(directory);
+    } catch (error) {
+      lastError = error;
+    }
+    if (lastError) {
+      throw lastError;
+    }
+  };
+  const cleanupTempDir = () => {
+    try {
+      if (!tempDir) {
+        return;
+      }
+      removeDirectory(tempDir);
+    } catch (cleanupError) {
+      console.warn(
+        `Warning: Unable to remove temporary GTFS directory (${tempDir}): ${cleanupError.message}`
+      );
+    }
+  };
+  try {
+    zip.extractAllTo(tempDir, true);
+    REQUIRED_FILES.forEach((file) => {
+      const filePath = path.join(tempDir, file);
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`Missing required GTFS file: ${file}`);
+      }
+      files[file] = filePath;
+    });
+    const calendarPath = path.join(tempDir, 'calendar.txt');
+    if (fs.existsSync(calendarPath)) {
+      files['calendar.txt'] = calendarPath;
+    }
+  } catch (error) {
+    cleanupTempDir();
+    throw error;
+  }
+  return {
+    files,
+    cleanup: cleanupTempDir
+  };
 };
 
 const timeToMinutes = (timeValue) => {
@@ -182,6 +261,8 @@ const timeToMinutes = (timeValue) => {
   if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
   return hours * 60 + minutes;
 };
+
+const normalizeStartMinutes = (minutes) => (minutes == null ? 0 : minutes);
 
 const formatTime = (timeValue) => {
   if (!timeValue) return '';
@@ -457,7 +538,7 @@ const writePdf = (timetable, outputDir) => {
   return filePath;
 };
 
-const main = () => {
+const main = async () => {
   const args = parseArgs(process.argv);
   if (args.help || !args.input) {
     printHelp();
@@ -465,31 +546,94 @@ const main = () => {
   }
   const outputDir = path.resolve(args.output);
   fs.mkdirSync(outputDir, { recursive: true });
-  const files = loadGtfsFiles(path.resolve(args.input));
-  const gtfs = {
-    routes: parseCsv(files['routes.txt']),
-    trips: parseCsv(files['trips.txt']),
-    stops: parseCsv(files['stops.txt']),
-    stopTimes: parseCsv(files['stop_times.txt']),
-    calendar: files['calendar.txt'] ? parseCsv(files['calendar.txt']) : []
-  };
-  if (!gtfs.routes.length || !gtfs.trips.length) {
-    throw new Error('GTFS feed is missing route or trip data.');
+  const { files, cleanup } = loadGtfsFiles(path.resolve(args.input));
+  try {
+    const routes = await parseCsv(fs.createReadStream(files['routes.txt']));
+    const trips = await parseCsv(fs.createReadStream(files['trips.txt']));
+    if (!routes.length || !trips.length) {
+      throw new Error('GTFS feed is missing route or trip data.');
+    }
+    const stops = await parseCsv(fs.createReadStream(files['stops.txt']));
+    const calendar = files['calendar.txt']
+      ? await parseCsv(fs.createReadStream(files['calendar.txt']))
+      : [];
+    const routeIdsToRender = new Set(
+      routes
+        .filter(
+          (route) =>
+            !args.route ||
+            args.route === route.route_id ||
+            args.route === route.route_short_name
+        )
+        .map((route) => route.route_id)
+    );
+    const relevantTrips = trips.filter((trip) => routeIdsToRender.has(trip.route_id));
+    const tripsById = new Map(relevantTrips.map((trip) => [trip.trip_id, trip]));
+    const tripStartTimes = new Map();
+    if (tripsById.size) {
+      await parseCsvStream(fs.createReadStream(files['stop_times.txt']), (record) => {
+        if (!tripsById.has(record.trip_id)) return;
+        const sequence = Number(record.stop_sequence);
+        if (!Number.isFinite(sequence)) return;
+        const timeValue = record.departure_time || record.arrival_time;
+        const startMinutes = normalizeStartMinutes(timeToMinutes(timeValue));
+        const existing = tripStartTimes.get(record.trip_id);
+        if (!existing || sequence < existing.sequence) {
+          tripStartTimes.set(record.trip_id, { sequence, startMinutes });
+        }
+      });
+    }
+    const selectedTripIds = new Set();
+    const tripsByRoute = new Map();
+    relevantTrips.forEach((trip) => {
+      if (!tripStartTimes.has(trip.trip_id)) return;
+      if (!tripsByRoute.has(trip.route_id)) {
+        tripsByRoute.set(trip.route_id, []);
+      }
+      tripsByRoute.get(trip.route_id).push(trip);
+    });
+    tripsByRoute.forEach((routeTrips) => {
+      const sortedTrips = routeTrips
+        .map((trip) => ({
+          trip,
+          startMinutes: normalizeStartMinutes(tripStartTimes.get(trip.trip_id)?.startMinutes)
+        }))
+        .sort((a, b) => a.startMinutes - b.startMinutes)
+        .slice(0, args.maxTrips);
+      sortedTrips.forEach(({ trip }) => selectedTripIds.add(trip.trip_id));
+    });
+    const stopTimes = [];
+    if (selectedTripIds.size) {
+      await parseCsvStream(fs.createReadStream(files['stop_times.txt']), (record) => {
+        if (selectedTripIds.has(record.trip_id)) {
+          stopTimes.push(record);
+        }
+      });
+    }
+    const gtfs = {
+      routes,
+      trips,
+      stops,
+      stopTimes,
+      calendar
+    };
+    const timetables = buildTimetables(gtfs, args);
+    if (!timetables.length) {
+      throw new Error('No matching timetables found for the provided GTFS feed.');
+    }
+    timetables.forEach((timetable) => {
+      const htmlPath = writeHtml(timetable, outputDir);
+      const pdfPath = writePdf(timetable, outputDir);
+      console.log(`Generated ${htmlPath} and ${pdfPath}`);
+    });
+  } finally {
+    if (cleanup) {
+      cleanup();
+    }
   }
-  const timetables = buildTimetables(gtfs, args);
-  if (!timetables.length) {
-    throw new Error('No matching timetables found for the provided GTFS feed.');
-  }
-  timetables.forEach((timetable) => {
-    const htmlPath = writeHtml(timetable, outputDir);
-    const pdfPath = writePdf(timetable, outputDir);
-    console.log(`Generated ${htmlPath} and ${pdfPath}`);
-  });
 };
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   console.error(`Error: ${error.message}`);
   process.exit(1);
-}
+});
