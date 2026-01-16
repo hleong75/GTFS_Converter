@@ -73,7 +73,7 @@ Options:
 `);
 };
 
-const parseCsvStream = (stream, onRecord) =>
+const parseCsvStream = (stream, onRecord, transformRecord) =>
   new Promise((resolve, reject) => {
     const parser = parse({
       columns: true,
@@ -84,8 +84,12 @@ const parseCsvStream = (stream, onRecord) =>
     parser.on('readable', () => {
       let record;
       while ((record = parser.read()) !== null) {
+        const mappedRecord = transformRecord ? transformRecord(record) : record;
+        if (mappedRecord === null || mappedRecord === undefined) {
+          continue;
+        }
         if (onRecord) {
-          onRecord(record);
+          onRecord(mappedRecord);
         }
       }
     });
@@ -94,9 +98,9 @@ const parseCsvStream = (stream, onRecord) =>
     stream.pipe(parser);
   });
 
-const parseCsv = async (stream) => {
+const parseCsv = async (stream, transformRecord) => {
   const records = [];
-  await parseCsvStream(stream, (record) => records.push(record));
+  await parseCsvStream(stream, (record) => records.push(record), transformRecord);
   return records;
 };
 
@@ -328,13 +332,12 @@ const buildTimetables = (gtfs, options) => {
     }
     tripsByRoute.get(trip.route_id).push(trip);
   });
-  const stopTimesByTrip = new Map();
-  gtfs.stopTimes.forEach((stopTime) => {
-    if (!stopTimesByTrip.has(stopTime.trip_id)) {
-      stopTimesByTrip.set(stopTime.trip_id, []);
-    }
-    stopTimesByTrip.get(stopTime.trip_id).push(stopTime);
-  });
+  if (!(gtfs.stopTimesByTrip instanceof Map)) {
+    throw new Error(
+      'Stop times must be provided as a Map keyed by trip_id with arrays of stop times to build timetables.'
+    );
+  }
+  const stopTimesByTrip = gtfs.stopTimesByTrip;
   stopTimesByTrip.forEach((times) => {
     times.sort((a, b) => Number(a.stop_sequence) - Number(b.stop_sequence));
   });
@@ -617,17 +620,45 @@ const main = async () => {
   fs.mkdirSync(outputDir, { recursive: true });
   const { files, cleanup } = loadGtfsFiles(path.resolve(args.input));
   try {
-    const routes = await parseCsv(fs.createReadStream(files['routes.txt']));
-    const trips = await parseCsv(fs.createReadStream(files['trips.txt']));
+    const routes = await parseCsv(fs.createReadStream(files['routes.txt']), (record) => ({
+      route_id: record.route_id,
+      route_short_name: record.route_short_name,
+      route_long_name: record.route_long_name,
+      route_desc: record.route_desc,
+      agency_id: record.agency_id
+    }));
+    const trips = await parseCsv(fs.createReadStream(files['trips.txt']), (record) => ({
+      route_id: record.route_id,
+      trip_id: record.trip_id,
+      trip_headsign: record.trip_headsign,
+      service_id: record.service_id
+    }));
     if (!routes.length || !trips.length) {
       throw new Error('GTFS feed is missing route or trip data.');
     }
     const agencies = files['agency.txt']
-      ? await parseCsv(fs.createReadStream(files['agency.txt']))
+      ? await parseCsv(fs.createReadStream(files['agency.txt']), (record) => ({
+          agency_id: record.agency_id,
+          agency_name: record.agency_name
+        }))
       : [];
-    const stops = await parseCsv(fs.createReadStream(files['stops.txt']));
+    const stops = await parseCsv(fs.createReadStream(files['stops.txt']), (record) => ({
+      stop_id: record.stop_id,
+      stop_name: record.stop_name
+    }));
     const calendar = files['calendar.txt']
-      ? await parseCsv(fs.createReadStream(files['calendar.txt']))
+      ? await parseCsv(fs.createReadStream(files['calendar.txt']), (record) => ({
+          service_id: record.service_id,
+          start_date: record.start_date,
+          end_date: record.end_date,
+          monday: record.monday,
+          tuesday: record.tuesday,
+          wednesday: record.wednesday,
+          thursday: record.thursday,
+          friday: record.friday,
+          saturday: record.saturday,
+          sunday: record.sunday
+        }))
       : [];
     const routeIdsToRender = new Set(
       routes
@@ -641,20 +672,36 @@ const main = async () => {
     );
     const relevantTrips = trips.filter((trip) => routeIdsToRender.has(trip.route_id));
     const relevantTripIds = new Set(relevantTrips.map((trip) => trip.trip_id));
-    const stopTimes = [];
+    const stopTimesByTrip = new Map();
     if (relevantTripIds.size) {
-      await parseCsvStream(fs.createReadStream(files['stop_times.txt']), (record) => {
-        if (relevantTripIds.has(record.trip_id)) {
-          stopTimes.push(record);
+      await parseCsvStream(
+        fs.createReadStream(files['stop_times.txt']),
+        (record) => {
+          if (!stopTimesByTrip.has(record.trip_id)) {
+            stopTimesByTrip.set(record.trip_id, []);
+          }
+          stopTimesByTrip.get(record.trip_id).push(record);
+        },
+        (record) => {
+          if (!relevantTripIds.has(record.trip_id)) {
+            return null;
+          }
+          return {
+            trip_id: record.trip_id,
+            stop_id: record.stop_id,
+            arrival_time: record.arrival_time,
+            departure_time: record.departure_time,
+            stop_sequence: record.stop_sequence
+          };
         }
-      });
+      );
     }
     const gtfs = {
       agencies,
       routes,
-      trips,
+      trips: relevantTrips,
       stops,
-      stopTimes,
+      stopTimesByTrip,
       calendar
     };
     const timetables = buildTimetables(gtfs, args);
