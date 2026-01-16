@@ -85,7 +85,7 @@ const parseCsvStream = (stream, onRecord, transformRecord) =>
       let record;
       while ((record = parser.read()) !== null) {
         const mappedRecord = transformRecord ? transformRecord(record) : record;
-        if (mappedRecord === null || mappedRecord === undefined) {
+        if (mappedRecord == null) {
           continue;
         }
         if (onRecord) {
@@ -334,7 +334,7 @@ const buildTimetables = (gtfs, options) => {
   });
   const stopTimesByTrip =
     gtfs.stopTimesByTrip instanceof Map ? gtfs.stopTimesByTrip : new Map();
-  if (!gtfs.stopTimesByTrip && Array.isArray(gtfs.stopTimes)) {
+  if (!(gtfs.stopTimesByTrip instanceof Map) && Array.isArray(gtfs.stopTimes)) {
     gtfs.stopTimes.forEach((stopTime) => {
       if (!stopTimesByTrip.has(stopTime.trip_id)) {
         stopTimesByTrip.set(stopTime.trip_id, []);
